@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Co-op Minesweeper</title>
+<style>
+  :root { --bg:#1e2230; --panel:#2a3045; --text:#eef0f6; --cell:#c0c7d6; --open:#e9ecf3; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; min-height:100vh; display:flex; flex-direction:column; align-items:center;
+         font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  h1 { margin:8px 0 16px; font-size:1.4rem; }
+  .card { background:var(--panel); border-radius:12px; padding:20px; display:flex; flex-direction:column; gap:12px; width:min(340px,100%); }
+  input, button { font:inherit; padding:10px 12px; border-radius:8px; border:0; }
+  input { background:#fff; color:#111; }
+  #code { text-transform:uppercase; letter-spacing:.2em; text-align:center; }
+  button { background:#4f7cff; color:#fff; cursor:pointer; font-weight:600; }
+  button.alt { background:#3b4363; }
+  button:focus-visible, input:focus-visible { outline:3px solid #ffd166; outline-offset:2px; }
+  #err { color:#ff8a8a; min-height:1.2em; margin:0; }
+  #game { display:none; flex-direction:column; align-items:center; gap:12px; max-width:100%; }
+  .bar { display:flex; gap:8px 18px; flex-wrap:wrap; justify-content:center; align-items:center;
+         background:var(--panel); padding:10px 16px; border-radius:10px; }
+  .pl { font-weight:600; }
+  #wrap { max-width:100%; overflow-x:auto; padding:4px; }
+  #grid { display:grid; grid-template-columns:repeat(30, 26px); gap:1px; background:#8d95aa; border:3px solid #8d95aa;
+          user-select:none; -webkit-user-select:none; touch-action:manipulation; }
+  .c { width:26px; height:26px; background:var(--cell); display:flex; align-items:center; justify-content:center;
+       font:700 15px/1 system-ui; cursor:pointer; }
+  .c.o { background:var(--open); cursor:default; }
+  .c.x { background:#ff6b6b; }
+  #msg { font-size:1.2rem; font-weight:700; min-height:1.5em; text-align:center; }
+</style>
+</head>
+<body>
+<h1>Co-op Minesweeper</h1>
+
+<div id="lobby" class="card">
+  <input id="name" placeholder="Your name" maxlength="12" autocomplete="off">
+  <button id="create">Create room</button>
+  <input id="code" placeholder="CODE" maxlength="4" autocomplete="off">
+  <button id="join" class="alt">Join room</button>
+  <p id="err"></p>
+</div>
+
+<div id="game">
+  <div class="bar">
+    <span>Room <b id="rc"></b></span>
+    <span>Mines left <b id="left"></b></span>
+    <span>Time <b id="time">0</b>s</span>
+    <span id="players"></span>
+    <button id="mode" class="alt">Click: reveal</button>
+    <button id="again" style="display:none">Play again</button>
+  </div>
+  <div id="msg"></div>
+  <div id="wrap"><div id="grid"></div></div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const socket = io();
+const NUM = ['', '#1d4ed8', '#15803d', '#dc2626', '#1e3a8a', '#9a3412', '#0e7490', '#111', '#6b7280'];
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+let st = null, flagMode = false, cur = {}, recvAt = 0, last = -1;
+
+const grid = $('grid');
+const cells = [];
+for (let i = 0; i < 480; i++) {
+  const d = document.createElement('div');
+  d.className = 'c';
+  d.dataset.i = i;
+  cells.push(d);
+  grid.appendChild(d);
+}
+
+const ack = (res) => { $('err').textContent = (res && res.error) || ''; };
+$('create').onclick = () => socket.emit('create', $('name').value, ack);
+$('join').onclick = () => socket.emit('join', { code: $('code').value, name: $('name').value }, ack);
+$('again').onclick = () => socket.emit('restart');
+$('mode').onclick = () => {
+  flagMode = !flagMode;
+  $('mode').textContent = 'Click: ' + (flagMode ? 'flag' : 'reveal');
+};
+
+const idx = (e) => { const t = e.target.closest('.c'); return t ? +t.dataset.i : -1; };
+
+// Left click reveals (or chords on a number). Right click flags. Middle click chords.
+// The "Click: flag" toggle gives touch screens a way to flag.
+grid.addEventListener('click', (e) => {
+  const i = idx(e);
+  if (i < 0 || !st) return;
+  socket.emit(flagMode && st.cells[i] < 0 ? 'flag' : 'reveal', i);
+});
+grid.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  const i = idx(e);
+  if (i >= 0) socket.emit('flag', i);
+});
+grid.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
+grid.addEventListener('auxclick', (e) => {
+  if (e.button !== 1) return;
+  e.preventDefault();
+  const i = idx(e);
+  if (i >= 0) socket.emit('reveal', i);
+});
+grid.addEventListener('mouseover', (e) => {
+  const i = idx(e);
+  if (i >= 0 && i !== last) { last = i; socket.emit('cursor', i); }
+});
+
+function drawCursors() {
+  cells.forEach((d) => (d.style.boxShadow = ''));
+  for (const [id, i] of Object.entries(cur)) {
+    const p = st.players.find((p) => p.id === id);
+    if (p && id !== socket.id) cells[i].style.boxShadow = `inset 0 0 0 3px ${p.color}`;
+  }
+}
+
+function render() {
+  $('lobby').style.display = 'none';
+  $('game').style.display = 'flex';
+  $('rc').textContent = st.code;
+  $('left').textContent = st.left;
+  $('players').innerHTML = st.players
+    .map((p) => `<span class="pl" style="color:${p.color}">● ${esc(p.name)}${p.id === socket.id ? ' (you)' : ''}</span>`)
+    .join(' &nbsp; ');
+
+  st.cells.forEach((v, i) => {
+    const d = cells[i], isNum = v >= 0 && v <= 8;
+    d.className = 'c' + (isNum ? ' o' : v === 10 ? ' o x' : '');
+    d.style.color = v > 0 && v <= 8 ? NUM[v] : '';
+    d.textContent = v === -2 ? '🚩' : v > 0 && v <= 8 ? v : v === 9 ? '💣' : v === 10 ? '💥' : v === 11 ? '❌' : '';
+  });
+
+  const over = st.status === 'won' || st.status === 'lost';
+  $('again').style.display = over ? '' : 'none';
+  $('msg').textContent =
+    st.status === 'won' ? `Cleared in ${Math.round(st.elapsed / 1000)}s. Nice teamwork!`
+    : st.status === 'lost' ? `${st.by} hit a mine.` : '';
+  recvAt = Date.now();
+  drawCursors();
+  tick();
+}
+
+function tick() {
+  if (!st) return;
+  const ms = st.elapsed + (st.status === 'playing' ? Date.now() - recvAt : 0);
+  $('time').textContent = Math.floor(ms / 1000);
+}
+setInterval(tick, 250);
+
+socket.on('state', (s) => { st = s; render(); });
+socket.on('cursor', ({ id, i }) => { cur[id] = i; if (st) drawCursors(); });
+socket.on('disconnect', () => {
+  $('msg').textContent = 'Connection lost. Refresh and rejoin with the room code.';
+});
+</script>
+</body>
+</html>
