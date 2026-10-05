@@ -24,7 +24,7 @@
          background:var(--panel); padding:10px 16px; border-radius:10px; }
   .pl { font-weight:600; }
   #wrap { max-width:100%; overflow-x:auto; padding:4px; }
-  #grid { display:grid; grid-template-columns:repeat(30, 26px); gap:1px; background:#8d95aa; border:3px solid #8d95aa;
+  #grid, #rgrid { display:grid; grid-template-columns:repeat(30, 26px); gap:1px; background:#8d95aa; border:3px solid #8d95aa;
           user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; touch-action:manipulation; }
   .tip { display:none; font-size:.85rem; opacity:.75; text-align:center; }
   .c { width:26px; height:26px; background:var(--cell); display:flex; align-items:center; justify-content:center;
@@ -36,7 +36,16 @@
   #over .box { background:var(--panel); border-radius:14px; padding:24px 28px; display:flex; flex-direction:column; gap:12px;
                text-align:center; min-width:min(300px,90vw); box-shadow:0 8px 30px rgba(0,0,0,.45); }
   #omsg { font-size:1.3rem; font-weight:700; }
-  .lb { background:var(--panel); border-radius:10px; padding:12px 18px; width:220px; flex:none; }
+  .lb { background:var(--panel); border-radius:10px; padding:12px 18px; width:100%; }
+  #side { display:flex; flex-direction:column; gap:16px; width:220px; flex:none; }
+  #rpl { max-height:260px; overflow-y:auto; }
+  .lb li button.lk { background:none; border:0; padding:0; color:#8fb4ff; font-weight:700; text-decoration:underline; cursor:pointer; }
+  #rv { display:none; position:fixed; inset:0; background:rgba(20,24,38,.85); align-items:center; justify-content:center; z-index:20; padding:8px; }
+  #rv .box { background:var(--panel); border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:10px; max-width:100%; max-height:100%; overflow:auto; }
+  #rvt { font-weight:700; }
+  #rwrap { max-width:100%; overflow-x:auto; padding:4px; }
+  .rc { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .rc input[type=range] { flex:1; min-width:140px; padding:0; background:none; }
   .lb h2 { margin:0 0 8px; font-size:1.05rem; }
   .lb ol { margin:0; padding-left:1.4em; display:flex; flex-direction:column; gap:8px; }
   .lb li span { display:block; opacity:.75; font-size:.85rem; }
@@ -49,7 +58,7 @@
   .st th:first-child, .st td:first-child { text-align:left; }
   @media (max-width: 1100px) {
     #game { flex-direction:column-reverse; align-items:center; }
-    .lb { width:min(560px,100%); }
+    #side { width:min(560px,100%); }
   }
 </style>
 </head>
@@ -69,10 +78,17 @@
 </div>
 
 <div id="game">
-  <div class="lb">
-    <h2>Fastest clears</h2>
-    <ol id="lbl"></ol>
-    <p id="lbe">No clears yet. Be the first!</p>
+  <div id="side">
+    <div class="lb">
+      <h2>Fastest clears</h2>
+      <ol id="lbl"></ol>
+      <p id="lbe">No clears yet. Be the first!</p>
+    </div>
+    <div class="lb">
+      <h2>Saved replays</h2>
+      <ol id="rpl"></ol>
+      <p id="rpe">Nothing saved yet.</p>
+    </div>
   </div>
   <div id="main">
   <div class="bar">
@@ -95,8 +111,25 @@
 <div id="over">
   <div class="box">
     <div id="omsg"></div>
+    <button id="watch" style="display:none">Watch replay</button>
+    <button id="save" class="alt" style="display:none">Save replay</button>
+    <div id="saved" style="display:none">Replay saved &#10003;</div>
     <button id="again">Play again</button>
     <button id="peek" class="alt">View board</button>
+  </div>
+</div>
+
+<div id="rv">
+  <div class="box">
+    <div id="rvt"></div>
+    <div class="rc">
+      <button id="rplay">Pause</button>
+      <input type="range" id="rt" min="0" max="1000" value="0" step="100" aria-label="Replay position">
+      <span id="rtime"></span>
+      <button id="rspd" class="alt">1x</button>
+      <button id="rx" class="alt">Close</button>
+    </div>
+    <div id="rwrap"><div id="rgrid"></div></div>
   </div>
 </div>
 
@@ -219,6 +252,9 @@ function render() {
   $('msg').textContent = text;
   $('omsg').textContent = text;
   $('over').style.display = over && !peek ? 'flex' : 'none';
+  $('watch').style.display = st.rp ? '' : 'none';
+  $('save').style.display = st.rp && !st.rp.saved ? '' : 'none';
+  $('saved').style.display = st.rp && st.rp.saved ? '' : 'none';
   recvAt = Date.now();
   drawCursors();
   tick();
@@ -241,6 +277,93 @@ socket.on('stats', (all) => {
   }).join('');
   $('stt').innerHTML = '<tr><th>Player</th><th>Games</th><th>Wins</th><th>Mines hit</th><th>Mines/game</th><th>Reveals</th><th>Reveals/game</th><th>Reveals/min</th></tr>' + rows;
 });
+// ---- Replays: rebuilt from the move log, so nothing is video and files stay tiny ----
+const rgrid = $('rgrid'), rcells = [];
+for (let i = 0; i < 480; i++) {
+  const d = document.createElement('div');
+  d.className = 'c';
+  rcells.push(d);
+  rgrid.appendChild(d);
+}
+const SPEEDS = [1, 2, 4, 8];
+let R = null, T = 0, REND = 0, rplaying = false, rspeed = 1;
+
+function paint(els, vals) {
+  vals.forEach((v, i) => {
+    const d = els[i];
+    d.className = 'c' + (v >= 0 && v <= 8 ? ' o' : v === 10 ? ' o x' : '');
+    d.style.color = v > 0 && v <= 8 ? NUM[v] : '';
+    d.style.boxShadow = '';
+    d.textContent = v === -2 ? '🚩' : v > 0 && v <= 8 ? v : v === 9 ? '💣' : v === 10 ? '💥' : v === 11 ? '❌' : '';
+  });
+}
+
+// Board at time T = every logged event up to T applied in order.
+function rvDraw() {
+  const mines = new Set(R.mines), cell = Array(480).fill(-1), cur = {};
+  for (const [t, p, type, d] of R.ev) {
+    if (t > T) break;
+    if (type === 0) d.forEach((v) => { cell[v >> 4] = (v & 15) === 9 ? 10 : v & 15; });
+    else if (type === 1) { if (cell[d] === -1) cell[d] = -2; else if (cell[d] === -2) cell[d] = -1; }
+    else cur[p] = d;
+  }
+  if (T >= REND) { // final frame: show where the mines were
+    mines.forEach((m) => { if (R.status === 'won') cell[m] = -2; else if (cell[m] === -1) cell[m] = 9; });
+    if (R.status === 'lost') cell.forEach((v, i) => { if (v === -2 && !mines.has(i)) cell[i] = 11; });
+  }
+  paint(rcells, cell);
+  Object.entries(cur).forEach(([p, i]) => { rcells[i].style.boxShadow = `inset 0 0 0 3px ${R.players[p].color}`; });
+  $('rt').value = T;
+  $('rtime').textContent = Math.round(T / 1000) + 's / ' + Math.round(REND / 1000) + 's';
+}
+
+function openReplay(data) {
+  if (!data) { $('msg').textContent = 'Could not load that replay.'; return; }
+  R = data;
+  T = 0;
+  REND = (R.ev.length ? R.ev[R.ev.length - 1][0] : 0) + 1000;
+  $('rt').max = REND;
+  $('rvt').innerHTML = (R.status === 'won' ? 'Win' : 'Loss') + ' &middot; ' + fmt(R.ms) + ' &middot; ' +
+    new Date(R.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) + ' &middot; ' +
+    R.players.map((p) => `<span style="color:${p.color}">&#9679; ${esc(p.name)}</span>`).join(' ');
+  rplaying = true;
+  $('rplay').textContent = 'Pause';
+  $('rv').style.display = 'flex';
+  rvDraw();
+}
+
+setInterval(() => {
+  if (!R || !rplaying) return;
+  T = Math.min(REND, T + 100 * rspeed);
+  if (T >= REND) { rplaying = false; $('rplay').textContent = 'Play'; }
+  rvDraw();
+}, 100);
+
+$('rplay').onclick = () => {
+  if (!R) return;
+  if (T >= REND) { T = 0; rplaying = true; } else rplaying = !rplaying;
+  $('rplay').textContent = rplaying ? 'Pause' : 'Play';
+  rvDraw();
+};
+$('rt').oninput = (e) => { T = +e.target.value; rvDraw(); };
+$('rspd').onclick = () => {
+  rspeed = SPEEDS[(SPEEDS.indexOf(rspeed) + 1) % SPEEDS.length];
+  $('rspd').textContent = rspeed + 'x';
+};
+$('rx').onclick = () => { rplaying = false; $('rv').style.display = 'none'; };
+$('watch').onclick = () => socket.emit('getReplay', openReplay);
+$('save').onclick = () => socket.emit('saveReplay');
+$('rpl').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-id]');
+  if (b) socket.emit('loadReplay', b.dataset.id, openReplay);
+});
+socket.on('replays', (rows) => {
+  $('rpe').style.display = rows.length ? 'none' : '';
+  $('rpl').innerHTML = rows.map((r) =>
+    `<li><button class="lk" data-id="${r.id}">${r.status === 'won' ? 'Win' : 'Loss'} &middot; ${fmt(r.ms)}</button><span>${new Date(r.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span><span>${esc(r.players.join(', '))}</span></li>`
+  ).join('');
+});
+
 socket.on('board', (rows) => {
   $('lbe').style.display = rows.length ? 'none' : '';
   $('lbl').innerHTML = rows.map((r) =>
