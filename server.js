@@ -1,5 +1,7 @@
 const express = require('express');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { Server } = require('socket.io');
 
 const app = express();
@@ -11,6 +13,20 @@ const R = 16, C = 30, M = 99, N = R * C, MAX_PLAYERS = 3;
 const COLORS = ['#ff5d6c', '#4da3ff', '#4cd96f'];
 const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 const rooms = new Map();
+
+// Leaderboard: every won game is saved with its date and clear time, fastest first.
+const LB_FILE = path.join(process.env.DATA_DIR || __dirname, 'leaderboard.json');
+let board = [];
+try { board = JSON.parse(fs.readFileSync(LB_FILE, 'utf8')); } catch (e) { /* no file yet */ }
+const top = () => board.slice(0, 10);
+function record(r) {
+  const g = r.game;
+  board.push({ date: new Date().toISOString(), ms: g.end - g.start, players: [...r.players.values()].map((p) => p.name) });
+  board.sort((a, b) => a.ms - b.ms);
+  board = board.slice(0, 200);
+  try { fs.writeFileSync(LB_FILE, JSON.stringify(board)); } catch (e) { console.error('Could not save leaderboard:', e.message); }
+  io.to(r.code).emit('board', top());
+}
 
 const nbrs = (i) => {
   const r = (i / C) | 0, c = i % C, out = [];
@@ -86,7 +102,7 @@ function snapshot(r) {
     by: g.by,
     left: M - g.flag.filter(Boolean).length,
     elapsed: g.start ? end - g.start : 0,
-    players: [...r.players].map(([id, p]) => ({ id, ...p })),
+    players: [...r.players].map(([id, p]) => ({ id, name: p.name, color: p.color })),
   };
 }
 
@@ -97,32 +113,40 @@ const makeCode = () => {
   return code;
 };
 const cleanName = (n) => String(n || '').trim().slice(0, 12) || 'Player';
+const okId = (p) => typeof p === 'string' && /^[\w-]{8,40}$/.test(p);
 
 io.on('connection', (socket) => {
-  let room = null;
+  let room = null, pid = null;
 
-  const enter = (r, name) => {
+  // Players are keyed by a per-browser id, so someone who drops can reconnect into their old seat.
+  const enter = (r, name, id) => {
+    const old = r.players.get(id);
     const used = new Set([...r.players.values()].map((p) => p.color));
-    r.players.set(socket.id, { name, color: COLORS.find((c) => !used.has(c)) });
+    r.players.set(id, { name, color: old ? old.color : COLORS.find((c) => !used.has(c)), sid: socket.id });
+    clearTimeout(r.timer);
     room = r;
+    pid = id;
     socket.join(r.code);
+    socket.emit('board', top());
     io.to(r.code).emit('state', snapshot(r));
   };
 
-  socket.on('create', (name, ack) => {
+  socket.on('create', ({ name, pid: id } = {}, ack) => {
     if (room) return;
-    const r = { code: makeCode(), players: new Map(), game: newGame() };
+    if (!okId(id)) return ack({ error: 'Please refresh the page and try again.' });
+    const r = { code: makeCode(), players: new Map(), game: newGame(), timer: null };
     rooms.set(r.code, r);
-    enter(r, cleanName(name));
+    enter(r, cleanName(name), id);
     ack({ ok: true });
   });
 
-  socket.on('join', ({ code, name } = {}, ack) => {
+  socket.on('join', ({ code, name, pid: id } = {}, ack) => {
     if (room) return;
+    if (!okId(id)) return ack({ error: 'Please refresh the page and try again.' });
     const r = rooms.get(String(code || '').trim().toUpperCase());
     if (!r) return ack({ error: 'Room not found. Check the code.' });
-    if (r.players.size >= MAX_PLAYERS) return ack({ error: 'Room is full (3 players max).' });
-    enter(r, cleanName(name));
+    if (!r.players.has(id) && r.players.size >= MAX_PLAYERS) return ack({ error: 'Room is full (3 players max).' });
+    enter(r, cleanName(name), id);
     ack({ ok: true });
   });
 
@@ -130,9 +154,10 @@ io.on('connection', (socket) => {
     if (!room || !Number.isInteger(i) || i < 0 || i >= N) return;
     const g = room.game;
     if (g.status === 'won' || g.status === 'lost') return;
-    g.by = room.players.get(socket.id).name;
+    g.by = room.players.get(pid).name;
     fn(g);
     settle(g);
+    if (g.status === 'won') record(room);
     io.to(room.code).emit('state', snapshot(room));
   };
 
@@ -147,7 +172,7 @@ io.on('connection', (socket) => {
   socket.on('flag', (i) => act(i, (g) => { if (!g.rev[i]) g.flag[i] = !g.flag[i]; }));
 
   socket.on('cursor', (i) => {
-    if (room && Number.isInteger(i)) socket.to(room.code).emit('cursor', { id: socket.id, i });
+    if (room && Number.isInteger(i)) socket.to(room.code).emit('cursor', { id: pid, i });
   });
 
   socket.on('restart', () => {
@@ -157,10 +182,11 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    if (!room) return;
-    room.players.delete(socket.id);
-    if (!room.players.size) rooms.delete(room.code);
-    else io.to(room.code).emit('state', snapshot(room));
+    const r = room, p = r && r.players.get(pid);
+    if (!p || p.sid !== socket.id) return; // seat already taken over by a newer connection
+    r.players.delete(pid);
+    if (r.players.size) io.to(r.code).emit('state', snapshot(r));
+    else r.timer = setTimeout(() => rooms.delete(r.code), 5 * 60 * 1000); // keep an empty room briefly
   });
 });
 
