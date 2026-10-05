@@ -15,15 +15,11 @@ const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 const rooms = new Map();
 
 // Leaderboard: every won game is saved with its date and clear time, fastest first.
-const LB_FILE = path.join(process.env.DATA_DIR || __dirname, 'leaderboard.json');
 let board = [];
-try { board = JSON.parse(fs.readFileSync(LB_FILE, 'utf8')); } catch (e) { /* no file yet */ }
 const top = () => board.slice(0, 10);
 
 // Player stats. Guests aren't tracked. A game counts as played for anyone who made a move in it.
-const STATS_FILE = path.join(process.env.DATA_DIR || __dirname, 'stats.json');
 let stats = {};
-try { stats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); } catch (e) { /* no file yet */ }
 const pstat = (g) => (g.ps[g.by] ||= { reveals: 0, mines: 0 });
 function tally(r) {
   const g = r.game;
@@ -36,7 +32,7 @@ function tally(r) {
     t.reveals += s.reveals;
     t.ms += g.end - g.start;
   }
-  try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats)); } catch (e) { console.error('Could not save stats:', e.message); }
+  save('stats', stats);
   io.to(r.code).emit('stats', stats);
 }
 function record(r) {
@@ -44,7 +40,7 @@ function record(r) {
   board.push({ date: new Date().toISOString(), ms: g.end - g.start, players: [...r.players.values()].map((p) => p.name) });
   board.sort((a, b) => a.ms - b.ms);
   board = board.slice(0, 200);
-  try { fs.writeFileSync(LB_FILE, JSON.stringify(board)); } catch (e) { console.error('Could not save leaderboard:', e.message); }
+  save('leaderboard', board);
   io.to(r.code).emit('board', top());
 }
 
@@ -219,4 +215,55 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(process.env.PORT || 3000, () => console.log('Co-op Minesweeper is running'));
+// Storage: Upstash Redis when UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN are set (survives
+// restarts and redeploys); otherwise local files, which a free host erases on restart.
+const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL;
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+const useRedis = Boolean(REDIS_URL && REDIS_TOKEN);
+
+async function redis(cmd) {
+  const res = await fetch(REDIS_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${REDIS_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(cmd),
+  });
+  const out = await res.json();
+  if (!res.ok || out.error) throw new Error(out.error || `HTTP ${res.status}`);
+  return out.result;
+}
+const fileFor = (key) => path.join(process.env.DATA_DIR || __dirname, key + '.json');
+
+async function load(key, fallback) {
+  if (useRedis) {
+    const v = await redis(['GET', 'minesweeper:' + key]);
+    return v ? JSON.parse(v) : fallback;
+  }
+  try { return JSON.parse(fs.readFileSync(fileFor(key), 'utf8')); } catch (e) { return fallback; }
+}
+
+function save(key, data) {
+  const json = JSON.stringify(data);
+  const job = useRedis ? redis(['SET', 'minesweeper:' + key, json]) : fs.promises.writeFile(fileFor(key), json);
+  job.catch((e) => console.error(`Could not save ${key}:`, e.message));
+}
+
+// Load saved data before accepting players. If the database can't be reached, exit (the host restarts
+// us) instead of starting empty and overwriting saved results.
+(async () => {
+  let err;
+  for (let tries = 0; tries < 5; tries++) {
+    try {
+      board = await load('leaderboard', []);
+      stats = await load('stats', {});
+      server.listen(process.env.PORT || 3000, () =>
+        console.log(`Co-op Minesweeper is running (saving to ${useRedis ? 'Redis' : 'local files'})`));
+      return;
+    } catch (e) {
+      err = e;
+      console.error('Could not load saved data, retrying:', e.message);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  console.error('Giving up:', err.message);
+  process.exit(1);
+})();
