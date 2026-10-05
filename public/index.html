@@ -11,8 +11,8 @@
          font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
   h1 { margin:8px 0 16px; font-size:1.4rem; }
   .card { background:var(--panel); border-radius:12px; padding:20px; display:flex; flex-direction:column; gap:12px; width:min(340px,100%); }
-  input, button { font:inherit; padding:10px 12px; border-radius:8px; border:0; }
-  input { background:#fff; color:#111; }
+  input, select, button { font:inherit; padding:10px 12px; border-radius:8px; border:0; }
+  input, select { background:#fff; color:#111; }
   #code { text-transform:uppercase; letter-spacing:.2em; text-align:center; }
   button { background:#4f7cff; color:#fff; cursor:pointer; font-weight:600; }
   button.alt { background:#3b4363; }
@@ -40,6 +40,12 @@
   .lb ol { margin:0; padding-left:1.4em; display:flex; flex-direction:column; gap:8px; }
   .lb li span { display:block; opacity:.75; font-size:.85rem; }
   .lb p { margin:0; opacity:.75; }
+  .st { background:var(--panel); border-radius:10px; padding:12px 18px; max-width:100%; }
+  .st h2 { margin:0 0 8px; font-size:1.05rem; }
+  .sw { overflow-x:auto; }
+  .st table { border-collapse:collapse; font-size:.9rem; }
+  .st th, .st td { padding:4px 10px; text-align:right; white-space:nowrap; }
+  .st th:first-child, .st td:first-child { text-align:left; }
   @media (max-width: 1100px) {
     #game { flex-direction:column-reverse; align-items:center; }
     .lb { width:min(560px,100%); }
@@ -50,7 +56,11 @@
 <h1>Co-op Minesweeper</h1>
 
 <div id="lobby" class="card">
-  <input id="name" placeholder="Your name" maxlength="12" autocomplete="off">
+  <select id="name" aria-label="Who are you?">
+    <option value="" disabled selected>Who are you?</option>
+    <option>Ayis</option><option>Bryan</option><option>Mollie</option><option>David</option>
+    <option>Guest</option>
+  </select>
   <button id="create">Create room</button>
   <input id="code" placeholder="CODE" maxlength="4" autocomplete="off">
   <button id="join" class="alt">Join room</button>
@@ -73,6 +83,10 @@
   </div>
   <div id="msg"></div>
   <div id="wrap"><div id="grid"></div></div>
+  <div class="st">
+    <h2>Player stats</h2>
+    <div class="sw"><table id="stt"></table></div>
+  </div>
   </div>
 </div>
 
@@ -106,8 +120,13 @@ for (let i = 0; i < 480; i++) {
 }
 
 const ack = (res) => { $('err').textContent = (res && res.error) || ''; };
-$('create').onclick = () => socket.emit('create', { name: $('name').value, pid }, ack);
-$('join').onclick = () => socket.emit('join', { code: $('code').value, name: $('name').value, pid }, ack);
+const who = () => {
+  if ($('name').value) return true;
+  $('err').textContent = 'Pick who you are first.';
+  return false;
+};
+$('create').onclick = () => who() && socket.emit('create', { name: $('name').value, pid }, ack);
+$('join').onclick = () => who() && socket.emit('join', { code: $('code').value, name: $('name').value, pid }, ack);
 $('again').onclick = () => socket.emit('restart');
 let peek = false; // "View board" hides the end box until the next game
 $('peek').onclick = () => { peek = true; $('over').style.display = 'none'; };
@@ -190,6 +209,15 @@ function tick() {
 setInterval(tick, 250);
 
 socket.on('state', (s) => { st = s; render(); });
+const PLAYERS = ['Ayis', 'Bryan', 'Mollie', 'David'];
+const per = (a, b) => (b ? (a / b).toFixed(1) : '-');
+socket.on('stats', (all) => {
+  const rows = PLAYERS.map((n) => {
+    const s = all[n] || { games: 0, wins: 0, mines: 0, reveals: 0, ms: 0 };
+    return `<tr><td>${n}</td><td>${s.games}</td><td>${s.wins}</td><td>${s.mines}</td><td>${per(s.mines, s.games)}</td><td>${s.reveals}</td><td>${per(s.reveals, s.games)}</td><td>${per(s.reveals, s.ms / 60000)}</td></tr>`;
+  }).join('');
+  $('stt').innerHTML = '<tr><th>Player</th><th>Games</th><th>Wins</th><th>Mines hit</th><th>Mines/game</th><th>Reveals</th><th>Reveals/game</th><th>Reveals/min</th></tr>' + rows;
+});
 socket.on('board', (rows) => {
   $('lbe').style.display = rows.length ? 'none' : '';
   $('lbl').innerHTML = rows.map((r) =>
