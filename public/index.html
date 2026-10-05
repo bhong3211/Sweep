@@ -18,7 +18,8 @@
   button.alt { background:#3b4363; }
   button:focus-visible, input:focus-visible { outline:3px solid #ffd166; outline-offset:2px; }
   #err { color:#ff8a8a; min-height:1.2em; margin:0; }
-  #game { display:none; flex-direction:column; align-items:center; gap:12px; max-width:100%; }
+  #game { display:none; flex-direction:row; align-items:flex-start; justify-content:center; gap:16px; max-width:100%; }
+  #main { display:flex; flex-direction:column; align-items:center; gap:12px; min-width:0; max-width:100%; }
   .bar { display:flex; gap:8px 18px; flex-wrap:wrap; justify-content:center; align-items:center;
          background:var(--panel); padding:10px 16px; border-radius:10px; }
   .pl { font-weight:600; }
@@ -34,11 +35,15 @@
   #over .box { background:var(--panel); border-radius:14px; padding:24px 28px; display:flex; flex-direction:column; gap:12px;
                text-align:center; min-width:min(300px,90vw); box-shadow:0 8px 30px rgba(0,0,0,.45); }
   #omsg { font-size:1.3rem; font-weight:700; }
-  .lb { background:var(--panel); border-radius:10px; padding:12px 18px; width:min(560px,100%); }
+  .lb { background:var(--panel); border-radius:10px; padding:12px 18px; width:220px; flex:none; }
   .lb h2 { margin:0 0 8px; font-size:1.05rem; }
-  .lb ol { margin:0; padding-left:1.4em; display:flex; flex-direction:column; gap:4px; }
-  .lb li span { opacity:.75; margin-left:10px; }
+  .lb ol { margin:0; padding-left:1.4em; display:flex; flex-direction:column; gap:8px; }
+  .lb li span { display:block; opacity:.75; font-size:.85rem; }
   .lb p { margin:0; opacity:.75; }
+  @media (max-width: 1100px) {
+    #game { flex-direction:column-reverse; align-items:center; }
+    .lb { width:min(560px,100%); }
+  }
 </style>
 </head>
 <body>
@@ -53,6 +58,12 @@
 </div>
 
 <div id="game">
+  <div class="lb">
+    <h2>Fastest clears</h2>
+    <ol id="lbl"></ol>
+    <p id="lbe">No clears yet. Be the first!</p>
+  </div>
+  <div id="main">
   <div class="bar">
     <span>Room <b id="rc"></b></span>
     <span>Mines left <b id="left"></b></span>
@@ -62,10 +73,6 @@
   </div>
   <div id="msg"></div>
   <div id="wrap"><div id="grid"></div></div>
-  <div class="lb">
-    <h2>Fastest clears</h2>
-    <ol id="lbl"></ol>
-    <p id="lbe">No clears yet. Be the first!</p>
   </div>
 </div>
 
@@ -104,7 +111,7 @@ $('join').onclick = () => socket.emit('join', { code: $('code').value, name: $('
 $('again').onclick = () => socket.emit('restart');
 let peek = false; // "View board" hides the end box until the next game
 $('peek').onclick = () => { peek = true; $('over').style.display = 'none'; };
-const fmt = (ms) => { const s = Math.round(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+const fmt = (ms) => Math.round(ms / 1000) + 's';
 $('mode').onclick = () => {
   flagMode = !flagMode;
   $('mode').textContent = 'Click: ' + (flagMode ? 'flag' : 'reveal');
