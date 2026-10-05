@@ -30,6 +30,15 @@
   .c.o { background:var(--open); cursor:default; }
   .c.x { background:#ff6b6b; }
   #msg { font-size:1.2rem; font-weight:700; min-height:1.5em; text-align:center; }
+  #over { display:none; position:fixed; inset:0; background:rgba(20,24,38,.55); align-items:center; justify-content:center; z-index:10; }
+  #over .box { background:var(--panel); border-radius:14px; padding:24px 28px; display:flex; flex-direction:column; gap:12px;
+               text-align:center; min-width:min(300px,90vw); box-shadow:0 8px 30px rgba(0,0,0,.45); }
+  #omsg { font-size:1.3rem; font-weight:700; }
+  .lb { background:var(--panel); border-radius:10px; padding:12px 18px; width:min(560px,100%); }
+  .lb h2 { margin:0 0 8px; font-size:1.05rem; }
+  .lb ol { margin:0; padding-left:1.4em; display:flex; flex-direction:column; gap:4px; }
+  .lb li span { opacity:.75; margin-left:10px; }
+  .lb p { margin:0; opacity:.75; }
 </style>
 </head>
 <body>
@@ -50,16 +59,31 @@
     <span>Time <b id="time">0</b>s</span>
     <span id="players"></span>
     <button id="mode" class="alt">Click: reveal</button>
-    <button id="again" style="display:none">Play again</button>
   </div>
   <div id="msg"></div>
   <div id="wrap"><div id="grid"></div></div>
+  <div class="lb">
+    <h2>Fastest clears</h2>
+    <ol id="lbl"></ol>
+    <p id="lbe">No clears yet. Be the first!</p>
+  </div>
+</div>
+
+<div id="over">
+  <div class="box">
+    <div id="omsg"></div>
+    <button id="again">Play again</button>
+    <button id="peek" class="alt">View board</button>
+  </div>
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const socket = io();
+const pid = sessionStorage.getItem('pid') ||
+  (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now());
+sessionStorage.setItem('pid', pid);
 const NUM = ['', '#1d4ed8', '#15803d', '#dc2626', '#1e3a8a', '#9a3412', '#0e7490', '#111', '#6b7280'];
 const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
 let st = null, flagMode = false, cur = {}, recvAt = 0, last = -1;
@@ -75,9 +99,12 @@ for (let i = 0; i < 480; i++) {
 }
 
 const ack = (res) => { $('err').textContent = (res && res.error) || ''; };
-$('create').onclick = () => socket.emit('create', $('name').value, ack);
-$('join').onclick = () => socket.emit('join', { code: $('code').value, name: $('name').value }, ack);
+$('create').onclick = () => socket.emit('create', { name: $('name').value, pid }, ack);
+$('join').onclick = () => socket.emit('join', { code: $('code').value, name: $('name').value, pid }, ack);
 $('again').onclick = () => socket.emit('restart');
+let peek = false; // "View board" hides the end box until the next game
+$('peek').onclick = () => { peek = true; $('over').style.display = 'none'; };
+const fmt = (ms) => { const s = Math.round(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
 $('mode').onclick = () => {
   flagMode = !flagMode;
   $('mode').textContent = 'Click: ' + (flagMode ? 'flag' : 'reveal');
@@ -113,7 +140,7 @@ function drawCursors() {
   cells.forEach((d) => (d.style.boxShadow = ''));
   for (const [id, i] of Object.entries(cur)) {
     const p = st.players.find((p) => p.id === id);
-    if (p && id !== socket.id) cells[i].style.boxShadow = `inset 0 0 0 3px ${p.color}`;
+    if (p && id !== pid) cells[i].style.boxShadow = `inset 0 0 0 3px ${p.color}`;
   }
 }
 
@@ -122,8 +149,10 @@ function render() {
   $('game').style.display = 'flex';
   $('rc').textContent = st.code;
   $('left').textContent = st.left;
+  const me = st.players.find((p) => p.id === pid);
+  if (me) sessionStorage.setItem('room', JSON.stringify({ code: st.code, name: me.name }));
   $('players').innerHTML = st.players
-    .map((p) => `<span class="pl" style="color:${p.color}">● ${esc(p.name)}${p.id === socket.id ? ' (you)' : ''}</span>`)
+    .map((p) => `<span class="pl" style="color:${p.color}">● ${esc(p.name)}${p.id === pid ? ' (you)' : ''}</span>`)
     .join(' &nbsp; ');
 
   st.cells.forEach((v, i) => {
@@ -134,10 +163,13 @@ function render() {
   });
 
   const over = st.status === 'won' || st.status === 'lost';
-  $('again').style.display = over ? '' : 'none';
-  $('msg').textContent =
-    st.status === 'won' ? `Cleared in ${Math.round(st.elapsed / 1000)}s. Nice teamwork!`
+  const text =
+    st.status === 'won' ? `Cleared in ${fmt(st.elapsed)}. Nice teamwork!`
     : st.status === 'lost' ? `${st.by} hit a mine.` : '';
+  if (!over) peek = false;
+  $('msg').textContent = text;
+  $('omsg').textContent = text;
+  $('over').style.display = over && !peek ? 'flex' : 'none';
   recvAt = Date.now();
   drawCursors();
   tick();
@@ -151,9 +183,28 @@ function tick() {
 setInterval(tick, 250);
 
 socket.on('state', (s) => { st = s; render(); });
+socket.on('board', (rows) => {
+  $('lbe').style.display = rows.length ? 'none' : '';
+  $('lbl').innerHTML = rows.map((r) =>
+    `<li><b>${fmt(r.ms)}</b><span>${new Date(r.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span><span>${esc(r.players.join(', '))}</span></li>`
+  ).join('');
+});
 socket.on('cursor', ({ id, i }) => { cur[id] = i; if (st) drawCursors(); });
+// Fires on first load and after every reconnect: slip back into the saved room and seat.
+socket.on('connect', () => {
+  const saved = JSON.parse(sessionStorage.getItem('room') || 'null');
+  if (!saved) return;
+  socket.emit('join', { code: saved.code, name: saved.name, pid }, (res) => {
+    if (!res || !res.error) return;
+    sessionStorage.removeItem('room');
+    st = null;
+    $('game').style.display = 'none';
+    $('lobby').style.display = '';
+    $('err').textContent = res.error;
+  });
+});
 socket.on('disconnect', () => {
-  $('msg').textContent = 'Connection lost. Refresh and rejoin with the room code.';
+  $('msg').textContent = 'Connection lost. Reconnecting...';
 });
 </script>
 </body>
