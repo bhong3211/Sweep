@@ -19,6 +19,26 @@ const LB_FILE = path.join(process.env.DATA_DIR || __dirname, 'leaderboard.json')
 let board = [];
 try { board = JSON.parse(fs.readFileSync(LB_FILE, 'utf8')); } catch (e) { /* no file yet */ }
 const top = () => board.slice(0, 10);
+
+// Player stats. Guests aren't tracked. A game counts as played for anyone who made a move in it.
+const STATS_FILE = path.join(process.env.DATA_DIR || __dirname, 'stats.json');
+let stats = {};
+try { stats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); } catch (e) { /* no file yet */ }
+const pstat = (g) => (g.ps[g.by] ||= { reveals: 0, mines: 0 });
+function tally(r) {
+  const g = r.game;
+  for (const [name, s] of Object.entries(g.ps)) {
+    if (name === 'Guest' || !NAMES.includes(name)) continue;
+    const t = (stats[name] ||= { games: 0, wins: 0, mines: 0, reveals: 0, ms: 0 });
+    t.games++;
+    if (g.status === 'won') t.wins++;
+    t.mines += s.mines;
+    t.reveals += s.reveals;
+    t.ms += g.end - g.start;
+  }
+  try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats)); } catch (e) { console.error('Could not save stats:', e.message); }
+  io.to(r.code).emit('stats', stats);
+}
 function record(r) {
   const g = r.game;
   board.push({ date: new Date().toISOString(), ms: g.end - g.start, players: [...r.players.values()].map((p) => p.name) });
@@ -47,6 +67,7 @@ const newGame = () => ({
   start: 0,
   end: 0,
   by: '',
+  ps: {}, // per-player counts for this game
 });
 
 // Mines are placed on the first click, keeping that cell and its neighbours safe.
@@ -112,7 +133,8 @@ const makeCode = () => {
   while (rooms.has(code));
   return code;
 };
-const cleanName = (n) => String(n || '').trim().slice(0, 12) || 'Player';
+const NAMES = ['Ayis', 'Bryan', 'Mollie', 'David', 'Guest'];
+const cleanName = (n) => (NAMES.includes(n) ? n : 'Guest');
 const okId = (p) => typeof p === 'string' && /^[\w-]{8,40}$/.test(p);
 
 io.on('connection', (socket) => {
@@ -128,6 +150,7 @@ io.on('connection', (socket) => {
     pid = id;
     socket.join(r.code);
     socket.emit('board', top());
+    socket.emit('stats', stats);
     io.to(r.code).emit('state', snapshot(r));
   };
 
@@ -146,7 +169,9 @@ io.on('connection', (socket) => {
     const r = rooms.get(String(code || '').trim().toUpperCase());
     if (!r) return ack({ error: 'Room not found. Check the code.' });
     if (!r.players.has(id) && r.players.size >= MAX_PLAYERS) return ack({ error: 'Room is full (3 players max).' });
-    enter(r, cleanName(name), id);
+    const nm = cleanName(name);
+    if (nm !== 'Guest' && [...r.players].some(([k, p]) => k !== id && p.name === nm)) return ack({ error: `${nm} is already in this room.` });
+    enter(r, nm, id);
     ack({ ok: true });
   });
 
@@ -158,18 +183,22 @@ io.on('connection', (socket) => {
     fn(g);
     settle(g);
     if (g.status === 'won') record(room);
+    if (g.status === 'won' || g.status === 'lost') tally(room);
     io.to(room.code).emit('state', snapshot(room));
   };
 
   // Revealing an already-open number "chords": opens neighbours if enough flags surround it.
   socket.on('reveal', (i) =>
     act(i, (g) => {
-      if (!g.rev[i]) return reveal(g, i);
-      if (count(g, i) === nbrs(i).filter((n) => g.flag[n]).length) nbrs(i).forEach((n) => reveal(g, n));
+      const ps = pstat(g), before = g.rev.filter(Boolean).length;
+      if (!g.rev[i]) reveal(g, i);
+      else if (count(g, i) === nbrs(i).filter((n) => g.flag[n]).length) nbrs(i).forEach((n) => reveal(g, n));
+      if (g.rev.filter(Boolean).length > before) ps.reveals++; // a click that opened at least one cell
+      if (g.status === 'lost') ps.mines++; // this click hit the mine
     })
   );
 
-  socket.on('flag', (i) => act(i, (g) => { if (!g.rev[i]) g.flag[i] = !g.flag[i]; }));
+  socket.on('flag', (i) => act(i, (g) => { pstat(g); if (!g.rev[i]) g.flag[i] = !g.flag[i]; }));
 
   socket.on('cursor', (i) => {
     if (room && Number.isInteger(i)) socket.to(room.code).emit('cursor', { id: pid, i });
