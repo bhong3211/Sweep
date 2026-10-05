@@ -20,6 +20,26 @@ const top = () => board.slice(0, 10);
 
 // Player stats. Guests aren't tracked. A game counts as played for anyone who made a move in it.
 let stats = {};
+let replays = []; // saved replay index, newest first
+
+// A replay is a move log plus the mine layout, so it stays tiny (a few KB) compared with video.
+// Offered after any win, or after a loss that lasted more than 120 seconds.
+function makeReplay(r) {
+  const g = r.game, ms = g.end - g.start;
+  if (g.status === 'lost' && ms <= 120000) return;
+  g.rp = {
+    saved: false,
+    data: {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+      date: new Date().toISOString(),
+      status: g.status,
+      ms,
+      players: g.pl.map(({ name, color }) => ({ name, color })),
+      mines: g.mines.flatMap((m, i) => (m ? [i] : [])),
+      ev: g.ev,
+    },
+  };
+}
 const pstat = (g) => (g.ps[g.by] ||= { reveals: 0, mines: 0 });
 function tally(r) {
   const g = r.game;
@@ -64,6 +84,10 @@ const newGame = () => ({
   end: 0,
   by: '',
   ps: {}, // per-player counts for this game
+  ev: [], // replay log: [ms since first move, player slot, 0 reveal / 1 flag / 2 cursor, data]
+  pl: [], // replay: players who acted
+  t0: 0,
+  rp: null, // replay offered once the game ends
 });
 
 // Mines are placed on the first click, keeping that cell and its neighbours safe.
@@ -117,6 +141,7 @@ function snapshot(r) {
     cells,
     status: g.status,
     by: g.by,
+    rp: g.rp ? { saved: g.rp.saved } : null,
     left: M - g.flag.filter(Boolean).length,
     elapsed: g.start ? end - g.start : 0,
     players: [...r.players].map(([id, p]) => ({ id, name: p.name, color: p.color })),
@@ -147,6 +172,7 @@ io.on('connection', (socket) => {
     socket.join(r.code);
     socket.emit('board', top());
     socket.emit('stats', stats);
+    socket.emit('replays', replays);
     io.to(r.code).emit('state', snapshot(r));
   };
 
@@ -171,6 +197,17 @@ io.on('connection', (socket) => {
     ack({ ok: true });
   });
 
+  // Add one event to this game's replay log.
+  const note = (g, type, data) => {
+    let k = g.pl.findIndex((p) => p.id === pid);
+    if (k < 0) {
+      const p = room.players.get(pid);
+      k = g.pl.push({ id: pid, name: p.name, color: p.color }) - 1;
+    }
+    g.t0 = g.t0 || Date.now();
+    g.ev.push([Date.now() - g.t0, k, type, data]);
+  };
+
   const act = (i, fn) => {
     if (!room || !Number.isInteger(i) || i < 0 || i >= N) return;
     const g = room.game;
@@ -179,25 +216,55 @@ io.on('connection', (socket) => {
     fn(g);
     settle(g);
     if (g.status === 'won') record(room);
-    if (g.status === 'won' || g.status === 'lost') tally(room);
+    if (g.status === 'won' || g.status === 'lost') { tally(room); makeReplay(room); }
     io.to(room.code).emit('state', snapshot(room));
   };
 
   // Revealing an already-open number "chords": opens neighbours if enough flags surround it.
   socket.on('reveal', (i) =>
     act(i, (g) => {
-      const ps = pstat(g), before = g.rev.filter(Boolean).length;
-      if (!g.rev[i]) reveal(g, i);
-      else if (count(g, i) === nbrs(i).filter((n) => g.flag[n]).length) nbrs(i).forEach((n) => reveal(g, n));
-      if (g.rev.filter(Boolean).length > before) ps.reveals++; // a click that opened at least one cell
+      const ps = pstat(g), before = g.rev.slice();
+      if (!g.rev[i]) {
+        reveal(g, i);
+        if (g.rev[i] && !g.mines[i]) ps.reveals++; // only the clicked square counts, and only if it isn't a mine
+      } else if (count(g, i) === nbrs(i).filter((n) => g.flag[n]).length) nbrs(i).forEach((n) => reveal(g, n));
       if (g.status === 'lost') ps.mines++; // this click hit the mine
+      // Record what this click opened as cell * 16 + value (0-8 number, 9 mine).
+      const opened = [];
+      g.rev.forEach((o, c) => { if (o && !before[c]) opened.push(c * 16 + (g.mines[c] ? 9 : count(g, c))); });
+      if (opened.length) note(g, 0, opened);
     })
   );
 
-  socket.on('flag', (i) => act(i, (g) => { pstat(g); if (!g.rev[i]) g.flag[i] = !g.flag[i]; }));
+  socket.on('flag', (i) => act(i, (g) => { pstat(g); if (!g.rev[i]) { g.flag[i] = !g.flag[i]; note(g, 1, i); } }));
 
   socket.on('cursor', (i) => {
-    if (room && Number.isInteger(i)) socket.to(room.code).emit('cursor', { id: pid, i });
+    if (!room || !Number.isInteger(i) || i < 0 || i >= N) return;
+    socket.to(room.code).emit('cursor', { id: pid, i });
+    const g = room.game;
+    if (g.status === 'playing' && g.ev.length < 5000) note(g, 2, i); // cap keeps replays small
+  });
+
+  // Watching is private: only the asking player gets the replay. Saving is shared by the whole room.
+  const reply = (ack, v) => typeof ack === 'function' && ack(v);
+  socket.on('getReplay', (ack) => reply(ack, room && room.game.rp ? room.game.rp.data : null));
+
+  socket.on('saveReplay', () => {
+    const g = room && room.game;
+    if (!g || !g.rp || g.rp.saved) return;
+    g.rp.saved = true;
+    const d = g.rp.data;
+    save('replay-' + d.id, d);
+    replays.unshift({ id: d.id, date: d.date, status: d.status, ms: d.ms, players: d.players.map((p) => p.name) });
+    replays.splice(200).forEach((old) => drop('replay-' + old.id)); // keep only the newest 200
+    save('replays', replays);
+    io.emit('replays', replays);
+    io.to(room.code).emit('state', snapshot(room));
+  });
+
+  socket.on('loadReplay', (id, ack) => {
+    if (!/^[a-z0-9]{4,20}$/.test(String(id))) return reply(ack, null);
+    load('replay-' + id, null).then((d) => reply(ack, d)).catch(() => reply(ack, null));
   });
 
   socket.on('restart', () => {
@@ -247,6 +314,11 @@ function save(key, data) {
   job.catch((e) => console.error(`Could not save ${key}:`, e.message));
 }
 
+function drop(key) {
+  const job = useRedis ? redis(['DEL', 'minesweeper:' + key]) : fs.promises.unlink(fileFor(key));
+  job.catch(() => {});
+}
+
 // Load saved data before accepting players. If the database can't be reached, exit (the host restarts
 // us) instead of starting empty and overwriting saved results.
 (async () => {
@@ -255,6 +327,7 @@ function save(key, data) {
     try {
       board = await load('leaderboard', []);
       stats = await load('stats', {});
+      replays = await load('replays', []);
       server.listen(process.env.PORT || 3000, () =>
         console.log(`Co-op Minesweeper is running (saving to ${useRedis ? 'Redis' : 'local files'})`));
       return;
