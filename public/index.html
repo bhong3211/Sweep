@@ -25,7 +25,8 @@
   .pl { font-weight:600; }
   #wrap { max-width:100%; overflow-x:auto; padding:4px; }
   #grid { display:grid; grid-template-columns:repeat(30, 26px); gap:1px; background:#8d95aa; border:3px solid #8d95aa;
-          user-select:none; -webkit-user-select:none; touch-action:manipulation; }
+          user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; touch-action:manipulation; }
+  .tip { display:none; font-size:.85rem; opacity:.75; text-align:center; }
   .c { width:26px; height:26px; background:var(--cell); display:flex; align-items:center; justify-content:center;
        font:700 15px/1 system-ui; cursor:pointer; }
   .c.o { background:var(--open); cursor:default; }
@@ -82,6 +83,7 @@
     <button id="mode" class="alt">Click: reveal</button>
   </div>
   <div id="msg"></div>
+  <div id="tip" class="tip">Touch and hold a square to place a flag.</div>
   <div id="wrap"><div id="grid"></div></div>
   <div class="st">
     <h2>Player stats</h2>
@@ -140,13 +142,34 @@ const idx = (e) => { const t = e.target.closest('.c'); return t ? +t.dataset.i :
 
 // Left click reveals (or chords on a number). Right click flags. Middle click chords.
 // The "Click: flag" toggle gives touch screens a way to flag.
+// Touch: press and hold a square for 0.4s to flag it.
+let lpTimer = null, lpFired = false, lastTouchAt = 0;
+const stopLP = () => clearTimeout(lpTimer);
+grid.addEventListener('pointerdown', (e) => {
+  if (e.pointerType !== 'touch') return;
+  lastTouchAt = Date.now();
+  lpFired = false;
+  stopLP();
+  const i = idx(e);
+  if (i < 0) return;
+  lpTimer = setTimeout(() => {
+    lpFired = true;
+    socket.emit('flag', i);
+    if (navigator.vibrate) navigator.vibrate(30);
+  }, 400);
+});
+['pointerup', 'pointercancel', 'pointerleave'].forEach((t) => grid.addEventListener(t, stopLP));
+if (navigator.maxTouchPoints > 0) $('tip').style.display = 'block';
+
 grid.addEventListener('click', (e) => {
+  if (lpFired) { lpFired = false; return; } // that touch was a long press and already flagged
   const i = idx(e);
   if (i < 0 || !st) return;
   socket.emit(flagMode && st.cells[i] < 0 ? 'flag' : 'reveal', i);
 });
 grid.addEventListener('contextmenu', (e) => {
   e.preventDefault();
+  if (Date.now() - lastTouchAt < 1500) return; // touch long-press is handled above
   const i = idx(e);
   if (i >= 0) socket.emit('flag', i);
 });
