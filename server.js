@@ -9,14 +9,35 @@ const server = http.createServer(app);
 const io = new Server(server);
 app.use(express.static(__dirname + '/public'));
 
-const R = 16, C = 30, M = 99, N = R * C, MAX_PLAYERS = 3;
+const MAX_PLAYERS = 3;
+
+// Map settings. Hard is 99 mines on 16x30 (about 20.6%); the other difficulties are fixed shares of the board.
+const SIZES = { small: [9, 9], medium: [16, 16], large: [16, 30], xl: [24, 30] };
+const RATES = { easy: 0.12, intermediate: 0.15, hard: 99 / 480, expert: 0.25 };
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+function cleanSettings(s) {
+  s = s || {};
+  const difficulty = RATES[s.difficulty] ? s.difficulty : 'hard';
+  const size = SIZES[s.size] || s.size === 'custom' ? s.size : 'large';
+  let rows, cols, mines;
+  if (size === 'custom') {
+    rows = clamp(Math.floor(Number(s.rows)) || 0, 5, 40);
+    cols = clamp(Math.floor(Number(s.cols)) || 0, 5, 40);
+    mines = clamp(Math.floor(Number(s.mines)) || 0, 1, rows * cols - 9); // first click keeps 9 squares mine-free
+  } else {
+    [rows, cols] = SIZES[size];
+    mines = clamp(Math.round(rows * cols * RATES[difficulty]), 1, rows * cols - 9);
+  }
+  return { size, difficulty, rows, cols, mines };
+}
 const COLORS = ['#ff5d6c', '#4da3ff', '#4cd96f'];
 const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 const rooms = new Map();
 
 // Leaderboard: every won game is saved with its date and clear time, fastest first.
 let board = [];
-const top = () => board.slice(0, 10);
+const sameMap = (e, c) => (e.rows || 16) === c.rows && (e.cols || 30) === c.cols && (e.mines || 99) === c.mines;
+const top = (c) => board.filter((e) => sameMap(e, c)).sort((a, b) => a.ms - b.ms).slice(0, 10);
 
 // Player stats. Guests aren't tracked. A game counts as played for anyone who made a move in it.
 let stats = {};
@@ -34,6 +55,8 @@ function makeReplay(r) {
       date: new Date().toISOString(),
       status: g.status,
       ms,
+      rows: g.R,
+      cols: g.C,
       players: g.pl.map(({ name, color }) => ({ name, color })),
       mines: g.mines.flatMap((m, i) => (m ? [i] : [])),
       ev: g.ev,
@@ -57,15 +80,15 @@ function tally(r) {
 }
 function record(r) {
   const g = r.game;
-  board.push({ date: new Date().toISOString(), ms: g.end - g.start, players: [...r.players.values()].map((p) => p.name) });
-  board.sort((a, b) => a.ms - b.ms);
-  board = board.slice(0, 200);
+  board.push({ date: new Date().toISOString(), ms: g.end - g.start, rows: g.R, cols: g.C, mines: g.M, players: [...r.players.values()].map((p) => p.name) });
+  const same = board.filter((e) => sameMap(e, r.settings)).sort((a, b) => a.ms - b.ms).slice(0, 50);
+  board = board.filter((e) => !sameMap(e, r.settings)).concat(same); // keep the 50 fastest per map
   save('leaderboard', board);
-  io.to(r.code).emit('board', top());
+  io.to(r.code).emit('board', top(r.settings));
 }
 
-const nbrs = (i) => {
-  const r = (i / C) | 0, c = i % C, out = [];
+const nbrs = (g, i) => {
+  const { R, C } = g, r = (i / C) | 0, c = i % C, out = [];
   for (let dr = -1; dr <= 1; dr++)
     for (let dc = -1; dc <= 1; dc++) {
       const rr = r + dr, cc = c + dc;
@@ -73,12 +96,16 @@ const nbrs = (i) => {
     }
   return out;
 };
-const count = (g, i) => nbrs(i).filter((n) => g.mines[n]).length;
+const count = (g, i) => nbrs(g, i).filter((n) => g.mines[n]).length;
 
-const newGame = () => ({
+const newGame = (cfg) => ({
+  R: cfg.rows,
+  C: cfg.cols,
+  M: cfg.mines,
+  N: cfg.rows * cfg.cols,
   mines: null,
-  rev: Array(N).fill(false),
-  flag: Array(N).fill(false),
+  rev: Array(cfg.rows * cfg.cols).fill(false),
+  flag: Array(cfg.rows * cfg.cols).fill(false),
   status: 'ready', // ready -> playing -> won | lost
   start: 0,
   end: 0,
@@ -92,14 +119,14 @@ const newGame = () => ({
 
 // Mines are placed on the first click, keeping that cell and its neighbours safe.
 function place(g, first) {
-  const safe = new Set([first, ...nbrs(first)]);
-  const pool = [...Array(N).keys()].filter((i) => !safe.has(i));
+  const safe = new Set([first, ...nbrs(g, first)]);
+  const pool = [...Array(g.N).keys()].filter((i) => !safe.has(i));
   for (let i = pool.length - 1; i > 0; i--) {
     const j = (Math.random() * (i + 1)) | 0;
     [pool[i], pool[j]] = [pool[j], pool[i]];
   }
-  g.mines = Array(N).fill(false);
-  pool.slice(0, M).forEach((i) => (g.mines[i] = true));
+  g.mines = Array(g.N).fill(false);
+  pool.slice(0, g.M).forEach((i) => (g.mines[i] = true));
   g.status = 'playing';
   g.start = Date.now();
 }
@@ -113,12 +140,12 @@ function reveal(g, i) {
     if (g.rev[j] || g.flag[j]) continue;
     g.rev[j] = true;
     if (g.mines[j]) { g.status = 'lost'; return; }
-    if (count(g, j) === 0) stack.push(...nbrs(j));
+    if (count(g, j) === 0) stack.push(...nbrs(g, j));
   }
 }
 
 function settle(g) {
-  if (g.status === 'playing' && g.rev.filter(Boolean).length === N - M) {
+  if (g.status === 'playing' && g.rev.filter(Boolean).length === g.N - g.M) {
     g.status = 'won';
     g.mines.forEach((m, i) => { if (m) g.flag[i] = true; });
   }
@@ -142,7 +169,11 @@ function snapshot(r) {
     status: g.status,
     by: g.by,
     rp: g.rp ? { saved: g.rp.saved } : null,
-    left: M - g.flag.filter(Boolean).length,
+    rows: g.R,
+    cols: g.C,
+    mines: g.M,
+    set: r.settings,
+    left: g.M - g.flag.filter(Boolean).length,
     elapsed: g.start ? end - g.start : 0,
     players: [...r.players].map(([id, p]) => ({ id, name: p.name, color: p.color })),
   };
@@ -170,16 +201,17 @@ io.on('connection', (socket) => {
     room = r;
     pid = id;
     socket.join(r.code);
-    socket.emit('board', top());
+    socket.emit('board', top(r.settings));
     socket.emit('stats', stats);
     socket.emit('replays', replays);
     io.to(r.code).emit('state', snapshot(r));
   };
 
-  socket.on('create', ({ name, pid: id } = {}, ack) => {
+  socket.on('create', ({ name, pid: id, settings } = {}, ack) => {
     if (room) return;
     if (!okId(id)) return ack({ error: 'Please refresh the page and try again.' });
-    const r = { code: makeCode(), players: new Map(), game: newGame(), timer: null };
+    const cfg = cleanSettings(settings);
+    const r = { code: makeCode(), players: new Map(), settings: cfg, game: newGame(cfg), timer: null };
     rooms.set(r.code, r);
     enter(r, cleanName(name), id);
     ack({ ok: true });
@@ -209,7 +241,7 @@ io.on('connection', (socket) => {
   };
 
   const act = (i, fn) => {
-    if (!room || !Number.isInteger(i) || i < 0 || i >= N) return;
+    if (!room || !Number.isInteger(i) || i < 0 || i >= room.game.N) return;
     const g = room.game;
     if (g.status === 'won' || g.status === 'lost') return;
     g.by = room.players.get(pid).name;
@@ -227,7 +259,7 @@ io.on('connection', (socket) => {
       if (!g.rev[i]) {
         reveal(g, i);
         if (g.rev[i] && !g.mines[i]) ps.reveals++; // only the clicked square counts, and only if it isn't a mine
-      } else if (count(g, i) === nbrs(i).filter((n) => g.flag[n]).length) nbrs(i).forEach((n) => reveal(g, n));
+      } else if (count(g, i) === nbrs(g, i).filter((n) => g.flag[n]).length) nbrs(g, i).forEach((n) => reveal(g, n));
       if (g.status === 'lost') ps.mines++; // this click hit the mine
       // Record what this click opened as cell * 16 + value (0-8 number, 9 mine).
       const opened = [];
@@ -239,7 +271,7 @@ io.on('connection', (socket) => {
   socket.on('flag', (i) => act(i, (g) => { pstat(g); if (!g.rev[i]) { g.flag[i] = !g.flag[i]; note(g, 1, i); } }));
 
   socket.on('cursor', (i) => {
-    if (!room || !Number.isInteger(i) || i < 0 || i >= N) return;
+    if (!room || !Number.isInteger(i) || i < 0 || i >= room.game.N) return;
     socket.to(room.code).emit('cursor', { id: pid, i });
     const g = room.game;
     if (g.status === 'playing' && g.ev.length < 5000) note(g, 2, i); // cap keeps replays small
@@ -267,18 +299,39 @@ io.on('connection', (socket) => {
     load('replay-' + id, null).then((d) => reply(ack, d)).catch(() => reply(ack, null));
   });
 
-  socket.on('restart', () => {
-    if (!room || !['won', 'lost'].includes(room.game.status)) return;
-    room.game = newGame();
+  // Changing the map starts a fresh game for everyone in the room.
+  socket.on('settings', (s) => {
+    if (!room) return;
+    const cfg = cleanSettings(s), cur = room.settings;
+    room.settings = cfg;
+    if (cfg.rows !== cur.rows || cfg.cols !== cur.cols || cfg.mines !== cur.mines) {
+      clearTimeout(room.timer);
+      room.game = newGame(cfg);
+    }
+    io.to(room.code).emit('board', top(cfg));
     io.to(room.code).emit('state', snapshot(room));
   });
 
-  socket.on('disconnect', () => {
+  socket.on('restart', () => {
+    if (!room || !['won', 'lost'].includes(room.game.status)) return;
+    room.game = newGame(room.settings);
+    io.to(room.code).emit('state', snapshot(room));
+  });
+
+  const exit = () => {
     const r = room, p = r && r.players.get(pid);
     if (!p || p.sid !== socket.id) return; // seat already taken over by a newer connection
     r.players.delete(pid);
     if (r.players.size) io.to(r.code).emit('state', snapshot(r));
     else r.timer = setTimeout(() => rooms.delete(r.code), 5 * 60 * 1000); // keep an empty room briefly
+  };
+  socket.on('disconnect', exit);
+  // Home button: leave the room (leave the socket room first so we don't get the update that follows).
+  socket.on('leave', () => {
+    const r = room;
+    if (r) socket.leave(r.code);
+    exit();
+    room = null;
   });
 });
 
