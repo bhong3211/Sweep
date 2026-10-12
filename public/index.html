@@ -40,6 +40,8 @@
   #side { display:flex; flex-direction:column; gap:16px; width:220px; flex:none; }
   #rpl { max-height:260px; overflow-y:auto; }
   .lb li button.lk { background:none; border:0; padding:0; color:#8fb4ff; font-weight:700; text-decoration:underline; cursor:pointer; }
+  .lb li button.mv { background:#3b4363; padding:2px 7px; margin-left:6px; border-radius:6px; font-size:1rem; line-height:1.2; vertical-align:middle; }
+  .lb li button.mv:hover { background:#4f7cff; }
   #rv, .modal { display:none; position:fixed; inset:0; background:rgba(20,24,38,.85); align-items:center; justify-content:center; z-index:20; padding:8px; }
   #rv .box, .modal .box { background:var(--panel); border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:10px; max-width:100%; max-height:100%; overflow:auto; }
   #rvt { font-weight:700; }
@@ -484,8 +486,13 @@ $('home').onclick = () => {
 socket.on('board', (rows) => {
   $('lbe').style.display = rows.length ? 'none' : '';
   $('lbl').innerHTML = rows.map((r) =>
-    `<li><b>${fmt(r.ms)}</b><span>${new Date(r.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span><span>${esc(r.players.join(', '))}</span></li>`
+    `<li><b>${fmt(r.ms)}</b>${r.rid ? ` <button class="mv" data-rid="${r.rid}" title="Watch replay" aria-label="Watch replay of the ${fmt(r.ms)} win">&#127916;</button>` : ''}<span>${new Date(r.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span><span>${esc(r.players.join(', '))}</span></li>`
   ).join('');
+});
+// 🎬 on a leaderboard row opens that win in the replay viewer
+$('lbl').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-rid]');
+  if (b) socket.emit('loadReplay', b.dataset.rid, openReplay);
 });
 socket.on('cursor', ({ id, i }) => { cur[id] = i; if (st) drawCursors(); });
 // Fires on first load and after every reconnect: slip back into the saved room and seat.
