@@ -79,10 +79,22 @@ function tally(r) {
   io.to(r.code).emit('stats', stats);
 }
 function record(r) {
-  const g = r.game;
-  board.push({ date: new Date().toISOString(), ms: g.end - g.start, rows: g.R, cols: g.C, mines: g.M, players: [...r.players.values()].map((p) => p.name) });
+  const g = r.game, d = g.rp && g.rp.data;
+  const entry = { date: new Date().toISOString(), ms: g.end - g.start, rows: g.R, cols: g.C, mines: g.M, players: [...r.players.values()].map((p) => p.name) };
+  const before = top(r.settings); // the top 10 before this win
+  board.push(entry);
   const same = board.filter((e) => sameMap(e, r.settings)).sort((a, b) => a.ms - b.ms).slice(0, 50);
+  const gone = board.filter((e) => sameMap(e, r.settings) && !same.includes(e));
   board = board.filter((e) => !sameMap(e, r.settings)).concat(same); // keep the 50 fastest per map
+  // The top 10 on each map always keep their replay (the replay button on the leaderboard).
+  const now = top(r.settings);
+  if (d && now.includes(entry)) { entry.rid = d.id; save('replay-' + d.id, d); }
+  // Wins pushed out of the top 10 lose their replay to save space, unless someone saved it to Saved replays.
+  [...before.filter((e) => !now.includes(e)), ...gone].forEach((e) => {
+    if (!e.rid || replays.some((x) => x.id === e.rid)) return;
+    drop('replay-' + e.rid);
+    delete e.rid;
+  });
   save('leaderboard', board);
   io.to(r.code).emit('board', top(r.settings));
 }
@@ -247,8 +259,9 @@ io.on('connection', (socket) => {
     g.by = room.players.get(pid).name;
     fn(g);
     settle(g);
+    if (g.status === 'won' || g.status === 'lost') makeReplay(room); // before record(), so the leaderboard entry can link to it
     if (g.status === 'won') record(room);
-    if (g.status === 'won' || g.status === 'lost') { tally(room); makeReplay(room); }
+    if (g.status === 'won' || g.status === 'lost') tally(room);
     io.to(room.code).emit('state', snapshot(room));
   };
 
@@ -288,7 +301,8 @@ io.on('connection', (socket) => {
     const d = g.rp.data;
     save('replay-' + d.id, d);
     replays.unshift({ id: d.id, date: d.date, status: d.status, ms: d.ms, players: d.players.map((p) => p.name) });
-    replays.splice(200).forEach((old) => drop('replay-' + old.id)); // keep only the newest 200
+    // keep only the newest 200 saved replays (but never delete one a leaderboard win still points to)
+    replays.splice(200).forEach((old) => { if (!board.some((e) => e.rid === old.id)) drop('replay-' + old.id); });
     save('replays', replays);
     io.emit('replays', replays);
     io.to(room.code).emit('state', snapshot(room));
